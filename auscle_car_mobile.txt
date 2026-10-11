@@ -1,0 +1,371 @@
+"""
+MUSCLE CAR WORLD - mobile-friendly Python 3D driving prototype
+Install: pip install panda3d
+Run: python muscle_car_mobile.py
+
+Desktop:
+  W/S accelerate/brake, A/D steer, SPACE handbrake
+  E enter/exit, O door, L lights, N next car, M next map, C camera, R reset
+
+Touchscreen:
+  On-screen steering, gas, brake, handbrake, enter/exit, door, lights,
+  car/map selection and camera buttons.
+
+Maps: City, Track 1, Track 2, Desert, Forest.
+Vehicles: Dodge Charger Hellcat, Dodge Challenger Demon, Ram TRX,
+          Ford GT, Ford Mustang.
+
+This is a procedural prototype. For AAA visuals, import detailed licensed
+vehicle/environment assets and use a dedicated PBR renderer and physics.
+"""
+
+import math
+import random
+from direct.showbase.ShowBase import ShowBase
+from direct.task import Task
+from direct.gui.OnscreenText import OnscreenText
+from direct.gui.DirectGui import DirectButton
+from panda3d.core import (
+    AmbientLight, DirectionalLight, Vec3, Vec4, TextNode, Fog,
+    WindowProperties, loadPrcFileData
+)
+
+loadPrcFileData("", "window-title Muscle Car World Mobile")
+loadPrcFileData("", "sync-video true")
+loadPrcFileData("", "framebuffer-multisample 1")
+loadPrcFileData("", "multisamples 4")
+loadPrcFileData("", "win-size 1280 720")
+
+VEHICLES = [
+    dict(name="Dodge Charger Hellcat", color=(.72,.025,.018,1), power=32, grip=1.0, size=(2.05,4.9,1.35)),
+    dict(name="Dodge Challenger Demon", color=(.075,.08,.09,1), power=38, grip=.94, size=(2.08,4.85,1.34)),
+    dict(name="Ram TRX", color=(.08,.20,.68,1), power=28, grip=.84, size=(2.25,5.5,1.9)),
+    dict(name="Ford GT", color=(.015,.24,.86,1), power=39, grip=1.16, size=(2.0,4.55,1.12)),
+    dict(name="Ford Mustang", color=(.83,.25,.018,1), power=31, grip=1.03, size=(2.0,4.75,1.3)),
+]
+
+MAPS = ["城市", "赛道", "赛道2", "沙漠", "森林"]
+
+
+def box(parent, name, pos, scale, color, hpr=(0,0,0)):
+    node = parent.attachNewNode(name)
+    node.setPos(*pos)
+    node.setHpr(*hpr)
+    model = loader.loadModel("models/box")
+    model.reparentTo(node)
+    model.setScale(*scale)
+    model.setColor(*color)
+    model.setTwoSided(True)
+    return node
+
+
+def sphere(parent, name, pos, scale, color):
+    node = loader.loadModel("models/misc/sphere")
+    node.reparentTo(parent)
+    node.setName(name)
+    node.setPos(*pos)
+    node.setScale(*scale)
+    node.setColor(*color)
+    return node
+
+
+class Car:
+    def __init__(self, app, spec):
+        self.app, self.spec = app, spec
+        self.root = app.render.attachNewNode("car-" + spec["name"])
+        self.speed = 0.0
+        self.steer = 0.0
+        self.door_open = False
+        self.lights_on = False
+        self.wheels = []
+        self._build()
+
+    def _build(self):
+        w, length, h = self.spec["size"]
+        z = h*.55
+        box(self.root, "body", (0,0,z), (w/2,length/2,h*.28), self.spec["color"])
+        box(self.root, "hood", (0,length*.29,z+h*.12), (w*.46,length*.19,h*.10), self.spec["color"])
+        box(self.root, "trunk", (0,-length*.32,z+h*.11), (w*.45,length*.14,h*.09), self.spec["color"])
+        cz = z+h*.32
+        box(self.root, "cabin", (0,-length*.015,cz), (w*.36,length*.17,h*.23), (.025,.04,.055,1))
+        box(self.root, "windshield", (0,length*.13,cz+h*.13), (w*.335,length*.055,h*.045), (.18,.29,.35,1), (0,-17,0))
+        box(self.root, "rear-glass", (0,-length*.16,cz+h*.13), (w*.32,length*.045,h*.04), (.13,.21,.26,1), (0,14,0))
+        for side in (-1,1):
+            box(self.root, "side-window", (side*w*.365,0,cz+h*.02), (w*.035,length*.12,h*.13), (.10,.17,.21,1))
+            box(self.root, "mirror", (side*w*.52,length*.1,z+h*.25), (w*.065,length*.045,h*.055), (.04,.05,.06,1))
+        for x in (-w*.47,w*.47):
+            for y in (-length*.32,length*.32):
+                tire = sphere(self.root,"tire",(x,y,h*.25),(h*.22,w*.11,h*.22),(.018,.02,.023,1))
+                self.wheels.append(tire)
+                sphere(self.root,"alloy",(x*1.015,y,h*.25),(h*.12,w*.12,h*.12),(.55,.57,.60,1))
+        box(self.root,"grille",(0,length*.505,z),(w*.23,.035,h*.075),(.012,.015,.018,1))
+        self.lamps = []
+        for side in (-1,1):
+            lamp = box(self.root,"headlamp",(side*w*.34,length*.505,z+h*.04),(w*.095,.035,h*.045),(.75,.85,1,1))
+            self.lamps.append(lamp)
+            box(self.root,"tail-lamp",(side*w*.34,-length*.505,z+h*.04),(w*.10,.025,h*.05),(.9,.02,.012,1))
+        # Door hinge and door panel
+        self.door_hinge = self.root.attachNewNode("driver-door-hinge")
+        self.door_hinge.setPos(-w*.49,length*.18,z+h*.05)
+        box(self.door_hinge,"door",(0,-length*.18,0),(w*.045,length*.18,h*.20),self.spec["color"])
+        box(self.door_hinge,"door-glass",(0,-length*.18,h*.22),(w*.026,length*.16,h*.09),(.10,.17,.21,1))
+        box(self.root,"chassis",(0,0,h*.24),(w*.44,length*.43,h*.07),(.025,.028,.03,1))
+
+    def door(self):
+        self.door_open = not self.door_open
+        self.door_hinge.setH(-62 if self.door_open else 0)
+
+    def lights(self):
+        self.lights_on = not self.lights_on
+        for lamp in self.lamps:
+            lamp.setColor((1,.98,.70,1) if self.lights_on else (.75,.85,1,1))
+
+    def update(self, dt, throttle, brake, steer, handbrake, active):
+        if not active:
+            self.speed *= max(0,1-1.6*dt)
+            return
+        if throttle: self.speed += self.spec["power"]*dt
+        if brake: self.speed -= 40*dt
+        if handbrake: self.speed *= max(0,1-2.6*dt)
+        self.speed *= max(0,1-(.20 if not throttle else .055)*dt)
+        self.speed = max(-12,min(58,self.speed))
+        self.steer += (steer*31-self.steer)*min(1,dt*5)
+        sf = min(1,abs(self.speed)/4)
+        self.root.setH(self.root.getH()-self.steer*sf*self.spec["grip"]*dt*(1 if self.speed>=0 else -1))
+        self.root.setY(self.root,self.speed*dt)
+        for wheel in self.wheels:
+            wheel.setP(wheel.getP()+self.speed*dt*32)
+
+
+class Game(ShowBase):
+    def __init__(self):
+        super().__init__()
+        self.disableMouse()
+        self.setBackgroundColor(.48,.67,.86,1)
+        self.camLens.setFov(78)
+        self.camLens.setNearFar(.1,2200)
+        self.render.setShaderAuto()
+        self._lighting()
+        self.map_index = 0
+        self.map_root = self.render.attachNewNode("map-root")
+        self._build_map()
+        self.cars = [Car(self,s) for s in VEHICLES]
+        self.car_index = 0
+        self.car = self.cars[0]
+        self.in_car = True
+        self.cockpit = False
+        self.keys = {k:False for k in ("w","s","a","d","space")}
+        self.touch = {k:False for k in ("gas","brake","left","right","handbrake")}
+        self.player = self.render.attachNewNode("player")
+        self.player_body = box(self.player,"player-body",(0,0,1),(.25,.18,.48),(.1,.25,.8,1))
+        sphere(self.player,"player-head",(0,0,1.62),(.16,.16,.18),(.78,.58,.42,1))
+        self.player.hide()
+        self._hud()
+        self._bind()
+        self.taskMgr.add(self.update,"update-world")
+
+    def _lighting(self):
+        amb=AmbientLight("ambient")
+        amb.setColor(Vec4(.42,.44,.49,1))
+        self.render.setLight(self.render.attachNewNode(amb))
+        sun=DirectionalLight("sun")
+        sun.setColor(Vec4(1,.89,.72,1))
+        sun.setDirection(Vec3(-.6,-.8,-1))
+        sun.setShadowCaster(True,2048,2048)
+        sun.getLens().setFilmSize(180,180)
+        sun.getLens().setNearFar(1,700)
+        self.render.setLight(self.render.attachNewNode(sun))
+
+    def _clear_map(self):
+        self.map_root.removeNode()
+        self.map_root=self.render.attachNewNode("map-root")
+
+    def _build_map(self):
+        self._clear_map()
+        idx=self.map_index
+        random.seed(120+idx)
+        if idx == 0:
+            ground=(.17,.19,.20,1); road=(.10,.11,.12,1)
+        elif idx in (1,2):
+            ground=(.12,.30,.13,1); road=(.085,.09,.10,1)
+        elif idx == 3:
+            ground=(.68,.48,.25,1); road=(.42,.34,.25,1)
+        else:
+            ground=(.10,.25,.12,1); road=(.16,.19,.16,1)
+        box(self.map_root,"ground",(0,0,-.65),(600,600,.6),ground)
+        if idx in (1,2):
+            # Long closed-loop-ish circuit, with barriers and curbs
+            box(self.map_root,"main-straight",(0,0,-.22),(13,190,.18),road)
+            box(self.map_root,"far-turn",(0,94,-.22),(70,13,.18),road)
+            box(self.map_root,"back-straight",(0,65,-.22),(13,60,.18),road)
+            box(self.map_root,"near-turn",(0,-94,-.22),(70,13,.18),road)
+            for x in (-7.2,7.2):
+                box(self.map_root,"barrier",(x,0,.25),(.35,190,.5),(.82,.82,.78,1))
+            for y in (-94,94):
+                box(self.map_root,"barrier",(0,y,.25),(70,.35,.5),(.82,.82,.78,1))
+            for y in range(-85,90,9):
+                box(self.map_root,"track-dash",(0,y,-.105),(.14,3,.025),(.94,.91,.80,1))
+            if idx==2:
+                # Extra chicane and inner barriers
+                for y in (-48,-24,0,24,48):
+                    box(self.map_root,"chicane",(random.choice([-3.8,3.8]),y,.22),(2.2,.32,.4),(.95,.25,.025,1))
+                for x in (-22,22):
+                    box(self.map_root,"grandstand",(x,70,4),(6,18,4),(.28,.30,.33,1))
+        else:
+            box(self.map_root,"road",(0,0,-.25),(13,300,.18),road)
+            for x in (-6.5,6.5):
+                box(self.map_root,"road-edge",(x,0,-.12),(.13,300,.04),(.92,.86,.68,1))
+            for y in range(-145,150,10):
+                box(self.map_root,"lane-mark",(0,y,-.12),(.13,4,.03),(.95,.92,.82,1))
+        if idx==0:
+            for side in (-1,1):
+                for y in range(-130,140,22):
+                    x=side*random.choice([20,34,48])
+                    h=random.uniform(9,32)
+                    width=random.uniform(7,12)
+                    b=box(self.map_root,"city-building",(x,y,h/2),(width/2,6,h/2),
+                          random.choice([(.35,.38,.43,1),(.48,.44,.38,1),(.24,.29,.34,1)]))
+                    for floor in range(max(1,int(h//3))):
+                        for col in range(3):
+                            box(self.map_root,"window",(x-width*.28+col*width*.28,y-6.04,floor*2.6+1.7),
+                                (.55,.035,.7),random.choice([(.12,.23,.29,1),(.75,.62,.32,1)]))
+        elif idx==3:
+            for i in range(45):
+                x=random.choice([-1,1])*random.uniform(17,130)
+                y=random.uniform(-140,140)
+                sphere(self.map_root,"desert-rock",(x,y,random.uniform(.3,1)),(random.uniform(1,4),random.uniform(1,3),random.uniform(.5,2)),(.48,.36,.24,1))
+                if i%4==0:
+                    sphere(self.map_root,"cactus",(x+3,y+2,1.5),(.35,.35,1.5),(.16,.35,.13,1))
+        elif idx==4:
+            for i in range(120):
+                x=random.choice([-1,1])*random.uniform(17,145)
+                y=random.uniform(-150,150)
+                h=random.uniform(5,13)
+                box(self.map_root,"tree-trunk",(x,y,h*.35),(.35,.35,h*.35),(.25,.14,.07,1))
+                sphere(self.map_root,"tree-crown",(x,y,h*.85),(random.uniform(2,4),random.uniform(2,4),h*.48),
+                       random.choice([(.06,.25,.10,1),(.10,.34,.12,1),(.13,.29,.08,1)]))
+        # Light atmospheric fog
+        fog=Fog("map-fog")
+        fog.setColor(*ground[:3])
+        fog.setExpDensity(.00075 if idx in (0,4) else .00035)
+        self.render.setFog(fog)
+
+    def next_map(self):
+        self.map_index=(self.map_index+1)%len(MAPS)
+        self._build_map()
+        self.car.root.setPos(0,0,0)
+        self.car.root.setH(0)
+        self.car.speed=0
+        self.map_text.setText("地图："+MAPS[self.map_index])
+
+    def next_car(self):
+        old=self.car
+        self.car_index=(self.car_index+1)%len(self.cars)
+        self.car=self.cars[self.car_index]
+        self.car.root.setPos(old.root.getPos()+Vec3(4,0,0))
+        self.car.root.setH(old.root.getH())
+        self.car.speed=0
+        self.car_name.setText(self.car.spec["name"])
+
+    def enter_exit(self):
+        if self.in_car:
+            self.in_car=False
+            self.player.show()
+            self.player.setPos(self.car.root.getPos()+Vec3(-2,0,0))
+            if not self.car.door_open: self.car.door()
+        else:
+            if (self.player.getPos()-self.car.root.getPos()).length()<8:
+                self.in_car=True
+                self.player.hide()
+                if self.car.door_open: self.car.door()
+
+    def reset(self):
+        self.car.root.setPos(0,0,0)
+        self.car.root.setH(0)
+        self.car.speed=0
+
+    def _bind(self):
+        for k in ("w","s","a","d","space"):
+            self.accept(k,self.set_key,[k,True])
+            self.accept(k+"-up",self.set_key,[k,False])
+        self.accept("escape",self.userExit)
+        self.accept("e",self.enter_exit)
+        self.accept("o",self.car.door)
+        self.accept("l",self.car.lights)
+        self.accept("n",self.next_car)
+        self.accept("m",self.next_map)
+        self.accept("c",self.toggle_camera)
+        self.accept("r",self.reset)
+
+    def set_key(self,k,v): self.keys[k]=v
+    def toggle_camera(self): self.cockpit=not self.cockpit
+
+    def _hud(self):
+        self.title=OnscreenText(text="MUSCLE CAR WORLD",pos=(0,.94),scale=.05,
+            fg=(1,.9,.68,1),align=TextNode.ACenter)
+        self.car_name=OnscreenText(text=self.car.spec["name"],pos=(-1.29,.84),scale=.042,
+            fg=(1,1,1,1),align=TextNode.ALeft,mayChange=True)
+        self.map_text=OnscreenText(text="地图："+MAPS[self.map_index],pos=(1.28,.84),scale=.04,
+            fg=(1,1,1,1),align=TextNode.ARight,mayChange=True)
+        self.info=OnscreenText(text="",pos=(-1.29,.70),scale=.035,
+            fg=(1,1,1,1),align=TextNode.ALeft,mayChange=True)
+        self.help=OnscreenText(text="WASD驾驶 | E上下车 | O车门 | L车灯 | N车辆 | M地图 | C镜头",
+            pos=(0,-.96),scale=.031,fg=(1,1,1,1),align=TextNode.ACenter)
+        # Touch buttons; DirectButton works with mouse and touch input on supported builds.
+        self.buttons=[]
+        self._button("◀",-.94,-.63,lambda:self.set_touch("left",True),(.12,.12))
+        self._button("▶",-.76,-.63,lambda:self.set_touch("right",True),(.12,.12))
+        self._button("油门",.82,-.58,lambda:self.set_touch("gas",True),(.16,.12))
+        self._button("刹车",.62,-.58,lambda:self.set_touch("brake",True),(.16,.12))
+        self._button("手刹",.43,-.58,lambda:self.set_touch("handbrake",True),(.16,.12))
+        self._button("上下车",-.90,.38,self.enter_exit,(.18,.09))
+        self._button("车门",-.68,.38,self.car.door,(.15,.09))
+        self._button("车灯",-.49,.38,self.car.lights,(.15,.09))
+        self._button("换车",.49,.38,self.next_car,(.15,.09))
+        self._button("换地图",.68,.38,self.next_map,(.18,.09))
+        self._button("镜头",.90,.38,self.toggle_camera,(.15,.09))
+
+    def _button(self,label,x,y,command,scale):
+        b=DirectButton(text=label,scale=scale,pos=(x,0,y),command=command,
+            text_scale=.48,text_fg=(1,1,1,1),frameColor=(.06,.09,.13,.82),
+            relief=1, pressEffect=True)
+        self.buttons.append(b)
+
+    def set_touch(self,k,v=True):
+        self.touch[k]=v
+
+    def update(self,task):
+        dt=min(globalClock.getDt(),.04)
+        throttle=self.keys["w"] or self.touch["gas"]
+        brake=self.keys["s"] or self.touch["brake"]
+        steer=float(self.keys["a"] or self.touch["left"])-float(self.keys["d"] or self.touch["right"])
+        handbrake=self.keys["space"] or self.touch["handbrake"]
+        for c in self.cars:
+            c.update(dt,throttle,brake,steer,handbrake,self.in_car and c is self.car)
+        if not self.in_car:
+            move=Vec3(float(self.keys["d"])-float(self.keys["a"]),float(self.keys["w"])-float(self.keys["s"]),0)
+            if move.lengthSquared()>0:
+                move.normalize()
+                self.player.setPos(self.player.getPos()+move*dt*7)
+        if self.in_car:
+            if self.cockpit:
+                self.camera.setPos(self.car.root.getPos()+Vec3(0,-.25,1.55))
+                self.camera.setHpr(self.car.root.getH(),0,0)
+            else:
+                heading=math.radians(self.car.root.getH())
+                desired=self.car.root.getPos()+Vec3(-math.sin(heading)*11,-math.cos(heading)*11,5)
+                self.camera.setPos(self.camera.getPos()+(desired-self.camera.getPos())*min(1,dt*4))
+                self.camera.lookAt(self.car.root.getPos()+Vec3(0,0,1))
+        else:
+            desired=self.player.getPos()+Vec3(0,-7,3)
+            self.camera.setPos(self.camera.getPos()+(desired-self.camera.getPos())*min(1,dt*4))
+            self.camera.lookAt(self.player.getPos()+Vec3(0,0,1))
+        self.info.setText(
+            f"{'驾驶中' if self.in_car else '步行'}\n速度：{abs(self.car.speed)*2.237:05.1f} MPH\n"
+            f"车门：{'打开' if self.car.door_open else '关闭'}\n车灯：{'开启' if self.car.lights_on else '关闭'}"
+        )
+        return Task.cont
+
+
+if __name__=="__main__":
+    Game().run()
